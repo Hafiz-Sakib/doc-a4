@@ -1,6 +1,7 @@
-import { useState, useRef, useMemo } from 'react'
+import { useState, useRef, useMemo, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { PDFDocument } from 'pdf-lib'
+import heic2any from 'heic2any'
 
 // ---- Page geometry, measured directly off the reference LaTeX output ----
 // US Letter, default `article` class (no geometry package) — 612 x 792 pt.
@@ -11,20 +12,46 @@ const MARGIN_X = (PAGE_W - TEXT_WIDTH) / 2
 const TOP_OFFSET = 124.8 // page top -> top of first image
 const GAP = 15.17 // \vspace{0.5cm} as it actually renders
 
+const ACCEPT = '.jpg,.jpeg,.png,.heic,.heif,image/jpeg,image/png,image/heic,image/heif'
+
+function isHeic(file) {
+  const name = (file.name || '').toLowerCase()
+  const type = (file.type || '').toLowerCase()
+  return name.endsWith('.heic') || name.endsWith('.heif') || type.includes('heic') || type.includes('heif')
+}
+
+// Normalize any supported upload (jpg/png/heic/heif) into a browser-renderable
+// File the rest of the app can treat uniformly (preview + pdf embed).
+async function normalizeFile(file) {
+  if (!isHeic(file)) return { file, converted: false }
+  const out = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.92 })
+  const blob = Array.isArray(out) ? out[0] : out
+  const newName = (file.name || 'photo').replace(/\.(heic|heif)$/i, '') + '.jpg'
+  return { file: new File([blob], newName, { type: 'image/jpeg' }), converted: true }
+}
+
 function usePreviewUrl(file) {
   return useMemo(() => (file ? URL.createObjectURL(file) : null), [file])
 }
 
-function Slot({ index, label, file, onFile }) {
+function formatBadge(file) {
+  if (!file) return null
+  const type = file.type || ''
+  if (type.includes('png')) return 'PNG'
+  if (type.includes('jpeg') || type.includes('jpg')) return 'JPG'
+  return type.split('/')[1]?.toUpperCase() || 'IMG'
+}
+
+function Slot({ index, label, file, busy, onFile, onClear }) {
   const inputRef = useRef(null)
   const url = usePreviewUrl(file)
   const [dragging, setDragging] = useState(false)
   const [hovering, setHovering] = useState(false)
 
   return (
-    <div className="flex-1">
+    <div className="flex-1 min-w-0">
       <motion.div
-        onClick={() => inputRef.current.click()}
+        onClick={() => !busy && inputRef.current.click()}
         onMouseEnter={() => setHovering(true)}
         onMouseLeave={() => setHovering(false)}
         onDragOver={(e) => {
@@ -43,9 +70,11 @@ function Slot({ index, label, file, onFile }) {
             ? { scale: 1.03, boxShadow: '0 0 0 2px rgba(22,163,74,0.6), 0 0 32px 6px rgba(22,163,74,0.35)' }
             : { scale: 1, boxShadow: '0 0 0 0 rgba(22,163,74,0)' }
         }
-        whileTap={{ scale: 0.97 }}
+        whileTap={{ scale: busy ? 1 : 0.97 }}
         transition={{ type: 'spring', stiffness: 320, damping: 22 }}
-        className="relative aspect-[4/3] rounded-2xl bg-[var(--paper-panel)] border border-[var(--line)] cursor-pointer group overflow-hidden"
+        className={`relative aspect-[4/3] rounded-2xl bg-[var(--paper-panel)] border border-[var(--line)] group overflow-hidden ${
+          busy ? 'cursor-wait' : 'cursor-pointer'
+        }`}
       >
         {/* animated corner brackets, ID-slot style */}
         {['top-0 left-0 rounded-tl-2xl border-t-2 border-l-2', 'top-0 right-0 rounded-tr-2xl border-t-2 border-r-2', 'bottom-0 left-0 rounded-bl-2xl border-b-2 border-l-2', 'bottom-0 right-0 rounded-br-2xl border-b-2 border-r-2'].map(
@@ -78,13 +107,31 @@ function Slot({ index, label, file, onFile }) {
         <input
           ref={inputRef}
           type="file"
-          accept="image/*"
+          accept={ACCEPT}
           className="hidden"
-          onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])}
+          onChange={(e) => {
+            if (e.target.files?.[0]) onFile(e.target.files[0])
+            e.target.value = ''
+          }}
         />
 
         <AnimatePresence mode="wait">
-          {url ? (
+          {busy ? (
+            <motion.div
+              key="converting"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="w-full h-full flex flex-col items-center justify-center gap-2 text-[var(--ink-soft)]"
+            >
+              <motion.span
+                animate={{ rotate: 360 }}
+                transition={{ duration: 0.8, repeat: Infinity, ease: 'linear' }}
+                className="inline-block w-5 h-5 border-2 border-[var(--brass)]/30 border-t-[var(--brass)] rounded-full"
+              />
+              <span className="font-mono text-[11px] tracking-widest uppercase">Converting HEIC…</span>
+            </motion.div>
+          ) : url ? (
             <motion.img
               key={url}
               src={url}
@@ -111,13 +158,50 @@ function Slot({ index, label, file, onFile }) {
                 {`0${index}`}
               </motion.span>
               <span className="text-sm mt-1">Drop or click</span>
+              <span className="font-mono text-[10px] mt-1 text-[var(--ink-soft)]/70">JPG · PNG · HEIC</span>
             </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* format badge, top-left, when filled */}
+        <AnimatePresence>
+          {url && !busy && (
+            <motion.span
+              initial={{ opacity: 0, y: -4 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+              className="absolute top-2 left-2 font-mono text-[10px] tracking-widest px-1.5 py-0.5 rounded bg-[var(--paper)]/80 border border-[var(--line-hi)] text-[var(--gold)]"
+            >
+              {formatBadge(file)}
+            </motion.span>
+          )}
+        </AnimatePresence>
+
+        {/* clear button, top-right, when filled */}
+        <AnimatePresence>
+          {url && !busy && (
+            <motion.button
+              type="button"
+              initial={{ opacity: 0, y: -4 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+              whileHover={{ scale: 1.1 }}
+              whileTap={{ scale: 0.9 }}
+              onClick={(e) => {
+                e.stopPropagation()
+                onClear()
+              }}
+              className="absolute top-2 right-2 w-6 h-6 rounded-full bg-[var(--paper)]/80 border border-[var(--line-hi)] text-[var(--ink-soft)] hover:text-[var(--gold)] flex items-center justify-center leading-none"
+              aria-label={`Remove ${label}`}
+            >
+              ×
+            </motion.button>
           )}
         </AnimatePresence>
 
         {/* replace overlay on hover when filled */}
         <AnimatePresence>
-          {url && hovering && (
+          {url && hovering && !busy && (
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
@@ -204,8 +288,26 @@ function ProofSheet({ img1, img2 }) {
 export default function App() {
   const [img1, setImg1] = useState(null)
   const [img2, setImg2] = useState(null)
+  const [converting1, setConverting1] = useState(false)
+  const [converting2, setConverting2] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+
+  const handleFile = useCallback(async (slot, rawFile) => {
+    setError('')
+    const setImg = slot === 1 ? setImg1 : setImg2
+    const setConverting = slot === 1 ? setConverting1 : setConverting2
+    try {
+      setConverting(true)
+      const { file } = await normalizeFile(rawFile)
+      setImg(file)
+    } catch (e) {
+      console.error(e)
+      setError(`Image ${slot} could not be read (${rawFile.name || 'unknown file'}). Try a JPG, PNG, or HEIC photo.`)
+    } finally {
+      setConverting(false)
+    }
+  }, [])
 
   async function readImage(file) {
     const bytes = await file.arrayBuffer()
@@ -264,35 +366,73 @@ export default function App() {
     }
   }
 
+  const bothReady = img1 && img2
+  const anyConverting = converting1 || converting2
+
   return (
-    <div className="min-h-screen flex flex-col items-center px-4 py-14">
+    <div className="min-h-screen flex flex-col items-center px-4 py-10 sm:py-14">
       <div className="w-full max-w-lg">
         <motion.div
           initial={{ opacity: 0, y: -20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5 }}
-          className="text-center mb-10"
+          className="text-center mb-8 sm:mb-10"
         >
           <p className="font-mono text-xs tracking-[0.25em] text-[var(--gold)] uppercase mb-3">
             Proof Sheet
           </p>
-          <h1 className="font-display text-[var(--ink)] text-4xl uppercase">Assemble your figure page</h1>
+          <h1 className="font-display text-[var(--ink)] text-3xl sm:text-4xl uppercase">
+            Assemble your figure page
+          </h1>
           <p className="text-[var(--ink-soft)] text-sm mt-3 leading-relaxed">
-            Drop two images into the slots below. They're placed full width with a 0.5&nbsp;cm
+            Drop two photos into the slots below. They're placed full width with a 0.5&nbsp;cm
             gap, on a Letter page — matching the default LaTeX <span className="font-mono text-xs text-[var(--brass)]">article</span> class
             output — and exported as a real PDF, entirely in your browser.
           </p>
+          <div className="flex items-center justify-center gap-2 mt-4">
+            {['JPG', 'PNG', 'HEIC', 'HEIF'].map((f) => (
+              <span
+                key={f}
+                className="font-mono text-[10px] tracking-widest px-2 py-1 rounded-full border border-[var(--line-hi)] text-[var(--ink-soft)]"
+              >
+                {f}
+              </span>
+            ))}
+          </div>
         </motion.div>
 
         <motion.div
           initial={{ opacity: 0, y: 20, scale: 0.98 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
           transition={{ duration: 0.5, delay: 0.1 }}
-          className="bg-[var(--paper-panel)] border border-[var(--line)] rounded-2xl p-6 shadow-[0_16px_48px_rgba(0,0,0,0.35)]"
+          className="bg-[var(--paper-panel)] border border-[var(--line)] rounded-2xl p-5 sm:p-6 shadow-[0_16px_48px_rgba(0,0,0,0.35)]"
         >
-          <div className="flex gap-5">
-            <Slot index={1} label="Image 1" file={img1} onFile={setImg1} />
-            <Slot index={2} label="Image 2" file={img2} onFile={setImg2} />
+          {/* step indicator */}
+          <div className="flex items-center justify-center gap-3 mb-6 font-mono text-[10px] tracking-widest uppercase">
+            <span className={img1 ? 'text-[var(--brass)]' : 'text-[var(--ink-soft)]'}>1 · Upload</span>
+            <span className="text-[var(--line-hi)]">—</span>
+            <span className={bothReady ? 'text-[var(--brass)]' : 'text-[var(--ink-soft)]'}>2 · Preview</span>
+            <span className="text-[var(--line-hi)]">—</span>
+            <span className="text-[var(--ink-soft)]">3 · Export</span>
+          </div>
+
+          <div className="flex flex-col sm:flex-row gap-5">
+            <Slot
+              index={1}
+              label="Image 1"
+              file={img1}
+              busy={converting1}
+              onFile={(f) => handleFile(1, f)}
+              onClear={() => setImg1(null)}
+            />
+            <Slot
+              index={2}
+              label="Image 2"
+              file={img2}
+              busy={converting2}
+              onFile={(f) => handleFile(2, f)}
+              onClear={() => setImg2(null)}
+            />
           </div>
 
           <div className="my-8 h-px bg-[var(--line)]" />
@@ -315,9 +455,9 @@ export default function App() {
           <div className="mt-8 flex justify-center">
             <motion.button
               onClick={generatePDF}
-              disabled={busy}
-              whileHover={{ scale: busy ? 1 : 1.04, boxShadow: '0 6px 28px rgba(22,163,74,0.5)' }}
-              whileTap={{ scale: busy ? 1 : 0.96 }}
+              disabled={busy || anyConverting}
+              whileHover={{ scale: busy || anyConverting ? 1 : 1.04, boxShadow: '0 6px 28px rgba(22,163,74,0.5)' }}
+              whileTap={{ scale: busy || anyConverting ? 1 : 0.96 }}
               className="font-mono text-xs tracking-widest uppercase bg-gradient-to-r from-[var(--brass-dark)] to-[var(--brass)] disabled:opacity-40 disabled:cursor-not-allowed text-white px-8 py-3.5 rounded-xl transition-colors"
             >
               {busy ? (
@@ -329,6 +469,8 @@ export default function App() {
                   />
                   Assembling…
                 </span>
+              ) : anyConverting ? (
+                'Converting…'
               ) : (
                 'Export PDF'
               )}
@@ -337,7 +479,7 @@ export default function App() {
         </motion.div>
 
         <p className="text-center font-mono text-[11px] text-[var(--ink-soft)] mt-6">
-          No upload, no server — the PDF is built locally on your device.
+          No upload, no server — the PDF is built and converted locally on your device.
         </p>
       </div>
     </div>
